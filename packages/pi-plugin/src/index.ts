@@ -131,7 +131,6 @@ import {
 	registerCtxStatusEntryRenderer,
 	registerCtxStatusLifecycleSignal,
 	resolveSessionId,
-	sendCtxStatusMessage,
 } from "./commands/pi-command-utils";
 import { loadPiConfig, loadPiConfigDetailed } from "./config";
 import {
@@ -732,7 +731,20 @@ export async function persistPiPressureFromMessageEnd(args: {
 		lastUsageContextLimit: number;
 		observedSafeInputTokens: number;
 		cacheAlertSent: boolean;
-	}> = { lastResponseTime: Date.now() };
+	}> = {};
+	// last_response_time is the idle clock for the provider cache: the
+	// scheduler's TTL execute and the ttl_idle HARD fold both measure from it.
+	// Only a request the provider served refreshes that cache, and only such a
+	// request reports usage, so only an assistant message with provider usage
+	// moves the clock (the same rule as OpenCode's message.updated handler).
+	// Pi also emits message_end for the user's own prompt (before that
+	// prompt's context pass), for tool results, and for failed requests (a
+	// quota error arrives as an assistant message with zero usage). Stamping
+	// on those made a pass after a long idle look like it followed a fresh
+	// response, so it deferred and queued drops never applied.
+	if (unboundedPressure !== null) {
+		updates.lastResponseTime = Date.now();
+	}
 
 	if (
 		trustedAbsoluteWall !== undefined &&
@@ -772,6 +784,9 @@ export async function persistPiPressureFromMessageEnd(args: {
 		requestAccepted ? undefined : trustedAbsoluteWall,
 	);
 
+	// Sent only after the reading is stored below, so a slow notification
+	// cannot hold the reading back from the next context pass.
+	let cacheAlert: string | undefined;
 	if (pressure) {
 		notePiUsageReadingUsed(args.sessionId);
 		const provenSafeInputTokens = requestSucceeded
@@ -800,9 +815,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 				activeModel.provider && activeModel.id
 					? `${activeModel.provider}/${activeModel.id}`
 					: "the active model";
-			await args.notifyIssue?.(
-				`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`,
-			);
+			cacheAlert = `⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`;
 		}
 		updates.lastContextPercentage = percentage;
 		updates.lastInputTokens = pressure.inputTokens;
@@ -839,6 +852,9 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}
 
 	updateSessionMeta(args.db, args.sessionId, updates);
+	if (cacheAlert !== undefined) {
+		await args.notifyIssue?.(cacheAlert);
+	}
 }
 
 /** Plugin version from package.json. */
@@ -1357,24 +1373,18 @@ async function startPiMagicContextRuntime(
 		resolveForProject: resolveContextOptionsForProject,
 		compactionOff,
 		allowHomeProject: cfg.allow_home_project,
+		// Automatic history embedding: silent (no timeline messages) and not
+		// gated on `memory.enabled`; only the embedding provider decides.
 		maybeAutoEmbedSession: (sessionId, dir, identity) => {
 			maybeAutoEmbedPiSession(
 				{
 					db: database,
 					projectDir: dir,
 					projectIdentity: identity,
-					memoryEnabled: cfg.memory.enabled,
 				},
 				sessionId,
 				dir,
 				identity,
-				(text) => {
-					sendCtxStatusMessage(pi, {
-						title: "/ctx-embed",
-						text,
-						level: "info",
-					});
-				},
 			);
 		},
 	});
@@ -1847,9 +1857,6 @@ async function startPiMagicContextRuntime(
 		db,
 		projectDir,
 		projectIdentity,
-		memoryEnabled: bootProjectDeps.config.memory.enabled,
-		resolveMemoryEnabled: (ctx) =>
-			resolveCurrentProjectDeps(ctx).config.memory.enabled,
 		resolveProject: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
 			return {

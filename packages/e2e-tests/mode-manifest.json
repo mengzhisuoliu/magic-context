@@ -338,6 +338,38 @@
             ]
         },
         {
+            "path": "tests/over-limit-usage-next-pass.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OpenCode 1.18.31 and later run the next step's transform without waiting for the plugin's message.updated handler; the scenario checks that an over-limit step's usage reaches the pass serving its tool result, which only the OpenCode 1 event delivery exercises",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/idle-ttl-pending-drops.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "the idle clock is stamped by each host's own event delivery (Pi message_end for prompts, tool results and failed requests; OpenCode message.updated for assistant messages); the scenario waits past a short cache TTL on a real host and checks that queued drops apply on the next pass, including after a refused request",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "pi",
+                "opencode",
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/drops.test.ts",
             "tier": "ts-only",
             "invocation": {
